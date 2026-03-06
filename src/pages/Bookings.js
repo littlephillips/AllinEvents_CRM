@@ -1,7 +1,10 @@
+
 import React, { useState, useEffect, useCallback } from 'react';
 import { C, fmtDate, fmtCurrency, statusColor } from '../utils/helpers';
 import { getAll, addRecord, updateRecord, deleteRecord, Col } from '../utils/firestore';
 import { Badge, Btn, Card, Input, Modal, Table, SectionHeader, SearchBar, ConfirmDialog, Spinner, EmptyState } from '../components/UI';
+import { collection, getDocs, addDoc, updateDoc, doc, query, where, serverTimestamp } from 'firebase/firestore';
+import { db } from '../firebase';
 
 const INITIAL = {
   fullname: '', email: '', phone: '', county: '',
@@ -11,15 +14,57 @@ const INITIAL = {
   depositPaid: 'No', depositAmount: '',
 };
 
+// ─── Auto client upsert ───────────────────────────────────────────────────────
+// Called only when a booking is saved with status = 'Confirmed'.
+// Checks by email — creates a new client if none exists, updates if they do.
+async function upsertClientFromBooking(booking) {
+  const email = (booking.email || '').trim().toLowerCase();
+  if (!email) return;
+
+  const snap = await getDocs(
+    query(collection(db, 'clients'), where('email', '==', email))
+  );
+
+  if (!snap.empty) {
+    // Client already exists — update their latest booking reference only
+    await updateDoc(doc(db, 'clients', snap.docs[0].id), {
+      lastBookingId:   booking.id   || '',
+      lastBookingDate: booking.eventdate  || '',
+      lastEventType:   booking.eventtype  || '',
+      updatedAt:       serverTimestamp(),
+    });
+  } else {
+    // Brand new client — create from booking details
+    await addDoc(collection(db, 'clients'), {
+      fullname:        booking.fullname   || '',
+      email:           email,
+      phone:           booking.phone      || '',
+      county:          booking.county     || '',
+      source:          booking.source     || 'Website',
+      status:          'Active',
+      lastBookingId:   booking.id         || '',
+      lastBookingDate: booking.eventdate  || '',
+      lastEventType:   booking.eventtype  || '',
+      notes:           '',
+      createdAt:       serverTimestamp(),
+      updatedAt:       serverTimestamp(),
+    });
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 export default function Bookings() {
-  const [data,         setData]         = useState([]);
-  const [loading,      setLoading]      = useState(true);
-  const [modal,        setModal]        = useState(false);
-  const [editing,      setEditing]      = useState(null);
-  const [deleteId,     setDeleteId]     = useState(null);
-  const [filter,       setFilter]       = useState('All');
-  const [search,       setSearch]       = useState('');
-  const [form,         setForm]         = useState(INITIAL);
+  const [data,       setData]       = useState([]);
+  const [loading,    setLoading]    = useState(true);
+  const [modal,      setModal]      = useState(false);
+  const [editing,    setEditing]    = useState(null);
+  const [deleteId,   setDeleteId]   = useState(null);
+  const [filter,     setFilter]     = useState('All');
+  const [search,     setSearch]     = useState('');
+  const [form,       setForm]       = useState(INITIAL);
+  const [saving,     setSaving]     = useState(false);
+  const [saveError,  setSaveError]  = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -36,23 +81,55 @@ export default function Bookings() {
   const openEdit = (row) => {
     setEditing(row.id);
     setForm({
-      fullname: row.fullname||'', email: row.email||'', phone: row.phone||'',
-      county: row.county||'', eventname: row.eventname||'',
-      eventdate: row.eventdate||'', eventtype: row.eventtype||'',
-      venue: row.venue||'', guestcount: row.guestcount||'',
-      budget: row.budget||'', status: row.status||'New',
-      assignedTo: row.assignedTo||'', notes: row.notes||'',
-      depositPaid: row.depositPaid||'No', depositAmount: row.depositAmount||'',
+      fullname:      row.fullname      || '',
+      email:         row.email         || '',
+      phone:         row.phone         || '',
+      county:        row.county        || '',
+      eventname:     row.eventname     || '',
+      eventdate:     row.eventdate     || '',
+      eventtype:     row.eventtype     || '',
+      venue:         row.venue         || '',
+      guestcount:    row.guestcount    || '',
+      budget:        row.budget        || '',
+      status:        row.status        || 'New',
+      assignedTo:    row.assignedTo    || '',
+      notes:         row.notes         || '',
+      depositPaid:   row.depositPaid   || 'No',
+      depositAmount: row.depositAmount || '',
     });
     setModal(true);
   };
 
   const save = async (e) => {
     e.preventDefault();
-    if (editing) await updateRecord(Col.bookings, editing, form);
-    else await addRecord(Col.bookings, form);
-    setModal(false);
-    load();
+    setSaving(true);
+    setSaveError(null);
+
+    try {
+      if (editing) {
+        await updateRecord(Col.bookings, editing, form);
+
+        // If admin just confirmed this booking → auto-create/update client
+        if (form.status === 'Confirmed') {
+          await upsertClientFromBooking({ id: editing, ...form });
+        }
+      } else {
+        const newId = await addRecord(Col.bookings, form);
+
+        // New booking created as Confirmed directly → create client too
+        if (form.status === 'Confirmed') {
+          await upsertClientFromBooking({ id: newId, ...form });
+        }
+      }
+
+      setModal(false);
+      load();
+    } catch (err) {
+      console.error('Save error:', err);
+      setSaveError('Could not save booking. Please try again.');
+    } finally {
+      setSaving(false);
+    }
   };
 
   const confirmDelete = async () => {
@@ -103,8 +180,8 @@ export default function Bookings() {
             padding: '5px 14px', borderRadius: 20, fontSize: 13, fontWeight: 600,
             cursor: 'pointer',
             background: filter === s ? C.blue : '#fff',
-            color: filter === s ? '#fff' : C.muted,
-            border: `1px solid ${filter === s ? C.blue : C.border}`,
+            color:      filter === s ? '#fff' : C.muted,
+            border:     `1px solid ${filter === s ? C.blue : C.border}`,
           }}>
             {s} ({s === 'All' ? data.length : data.filter(d => d.status === s).length})
           </button>
@@ -136,12 +213,12 @@ export default function Bookings() {
               { key: 'eventdate',   label: 'Date' },
               { key: 'venue',       label: 'Venue' },
               { key: 'guestcount',  label: 'Guests' },
-              { key: 'budget',      label: 'Budget', render: v => fmtCurrency(v) },
+              { key: 'budget',      label: 'Budget',  render: v => fmtCurrency(v) },
               { key: 'depositPaid', label: 'Deposit',
-                render: v => <Badge label={v||'No'} color={v==='Yes'?'green':'gray'} /> },
+                render: v => <Badge label={v || 'No'} color={v === 'Yes' ? 'green' : 'gray'} /> },
               { key: 'assignedTo',  label: 'Assigned To' },
               { key: 'status',      label: 'Status',
-                render: v => <Badge label={v||'New'} color={statusColor(v||'New')} /> },
+                render: v => <Badge label={v || 'New'} color={statusColor(v || 'New')} /> },
               { key: 'createdAt',   label: 'Created', render: v => fmtDate(v) },
             ]}
             data={filtered}
@@ -151,9 +228,11 @@ export default function Bookings() {
         )}
       </Card>
 
+      {/* Add / Edit modal */}
       {modal && (
         <Modal title={editing ? 'Edit Booking' : 'New Booking'} onClose={() => setModal(false)} wide>
           <form onSubmit={save}>
+
             <p style={{ margin: '0 0 14px', fontSize: 12, fontWeight: 700, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
               Client Information
             </p>
@@ -179,19 +258,37 @@ export default function Bookings() {
             <p style={{ margin: '8px 0 14px', fontSize: 12, fontWeight: 700, color: C.muted, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
               CRM Details
             </p>
+
+            {/* Status hint when Confirmed is selected */}
+            {form.status === 'Confirmed' && (
+              <div style={{ marginBottom: 14, padding: '10px 14px', background: '#d1fae5', border: '1px solid #6ee7b7', borderRadius: 8, fontSize: 13, color: '#065f46' }}>
+                ✅ Setting status to <strong>Confirmed</strong> will automatically create or update a client record for <strong>{form.email || 'this booking'}</strong>.
+              </div>
+            )}
+
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '0 16px' }}>
-              <Input label="Status"          value={form.status}        onChange={f('status')}        options={['New','Contacted','Confirmed','Completed','Cancelled']} />
-              <Input label="Assigned To"     value={form.assignedTo}    onChange={f('assignedTo')}    placeholder="Team member name" />
-              <Input label="Deposit Paid"    value={form.depositPaid}   onChange={f('depositPaid')}   options={['No','Yes']} />
+              <Input label="Status"       value={form.status}      onChange={f('status')}      options={['New','Contacted','Confirmed','Completed','Cancelled']} />
+              <Input label="Assigned To"  value={form.assignedTo}  onChange={f('assignedTo')}  placeholder="Team member name" />
+              <Input label="Deposit Paid" value={form.depositPaid} onChange={f('depositPaid')} options={['No','Yes']} />
             </div>
+
             {form.depositPaid === 'Yes' && (
               <Input label="Deposit Amount (KES)" value={form.depositAmount} onChange={f('depositAmount')} type="number" placeholder="e.g. 50000" />
             )}
+
             <Input label="Notes" value={form.notes} onChange={f('notes')} textarea placeholder="Special requirements, dietary needs, access notes..." />
+
+            {saveError && (
+              <div style={{ marginTop: 10, padding: '10px 14px', background: '#fee2e2', border: '1px solid #fca5a5', borderRadius: 8, fontSize: 13, color: '#991b1b' }}>
+                ⚠️ {saveError}
+              </div>
+            )}
 
             <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 8 }}>
               <Btn color="ghost" onClick={() => setModal(false)}>Cancel</Btn>
-              <Btn type="submit" color="primary">{editing ? 'Save Changes' : 'Create Booking'}</Btn>
+              <Btn type="submit" color="primary" disabled={saving}>
+                {saving ? 'Saving…' : editing ? 'Save Changes' : 'Create Booking'}
+              </Btn>
             </div>
           </form>
         </Modal>

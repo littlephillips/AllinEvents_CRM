@@ -1,3 +1,6 @@
+
+
+
 import { db } from '../firebase';
 import {
   collection, addDoc, getDocs, doc,
@@ -25,11 +28,12 @@ export async function getAll(colName, orderField = 'createdAt') {
 }
 
 export async function addRecord(colName, data) {
-  return addDoc(collection(db, colName), {
+  const docRef = await addDoc(collection(db, colName), {
     ...data,
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
+  return docRef.id; // return the new document ID, not the full reference
 }
 
 export async function updateRecord(colName, id, data) {
