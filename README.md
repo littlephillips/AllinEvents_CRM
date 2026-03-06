@@ -164,12 +164,3 @@ This runs `npm run build && firebase deploy` in one command.
 ## Support
 
 Built for All-in Events, Nairobi Kenya.
-
-
-
-git init
-git add README.md
-git commit -m "first commit"
-git branch -M main
-git remote add origin git@github.com:littlephillips/AllinEvents_CRM.git
-git push -u origin main
